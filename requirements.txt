@@ -1,0 +1,4 @@
+pygame
+yt-dlp
+python-vlc
+pillow
