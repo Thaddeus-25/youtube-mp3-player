@@ -121,6 +121,12 @@ class AudioPlayerApp:
         # --- playlist state ---
         self.playlist = []          # list of file paths
         self.playlist_index = -1    # index of currently loaded/playing track, -1 if none
+        self.playlist_visible = True
+
+        # --- mini player state ---
+        self.mini_mode = False
+        self._full_geometry = None
+        self._drag_offset = (0, 0)
 
         pygame.mixer.init()
 
@@ -131,15 +137,26 @@ class AudioPlayerApp:
     # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self):
-        title = tk.Label(
-            self.root, text="🎵  MP3 & YouTube Audio Player",
+        self.full_view = tk.Frame(self.root, bg=BG)
+        self.full_view.pack(fill="both", expand=True)
+
+        title_row = tk.Frame(self.full_view, bg=BG)
+        title_row.pack(fill="x", pady=(14, 6))
+        tk.Label(
+            title_row, text="🎵  MP3 & YouTube Audio Player",
             font=FONT_TITLE, bg=BG, fg=FG,
-        )
-        title.pack(pady=(14, 6))
+        ).pack(side="left", padx=(16, 0))
+        self._make_button(title_row, "🗕 Mini Player", self._toggle_mini_mode).pack(side="right", padx=(0, 16))
+
+        # ---- Load buttons (top) ----
+        load_row = tk.Frame(self.full_view, bg=BG)
+        load_row.pack(fill="x", padx=16, pady=(0, 10))
+        self._make_button(load_row, "Load Track", self.load_track).pack(side="left", padx=(0, 4))
+        self._make_button(load_row, "Load Folder", self.load_folder).pack(side="left", padx=4)
 
         # ---- Now playing / status panel ----
-        status_panel = tk.Frame(self.root, bg=BG_PANEL)
-        status_panel.pack(fill="x", padx=16, pady=(4, 10))
+        status_panel = tk.Frame(self.full_view, bg=BG_PANEL)
+        status_panel.pack(fill="x", padx=16, pady=(0, 10))
 
         self.status_var = tk.StringVar(value="No track loaded")
         tk.Label(
@@ -177,48 +194,36 @@ class AudioPlayerApp:
         tk.Label(progress_row, textvariable=self.duration_var, font=FONT_LABEL,
                  bg=BG_PANEL, fg=FG_MUTED, width=6).pack(side="left")
 
-        # ---- Local file controls ----
-        local_frame = tk.LabelFrame(
-            self.root, text="Playback Queue", font=FONT_LABEL,
-            bg=BG, fg=FG_MUTED, bd=1, labelanchor="nw",
+        # ---- Playlist (collapsible) ----
+        playlist_section = tk.Frame(self.full_view, bg=BG)
+        playlist_section.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        self.playlist_toggle_btn = tk.Button(
+            playlist_section, text="▼ Playlist", command=self._toggle_playlist,
+            font=FONT_BTN, bg=BG_PANEL, fg=FG, activebackground=BTN_ACTIVE,
+            activeforeground=FG, relief="flat", bd=0, anchor="w", padx=10,
+            cursor="hand2",
         )
-        local_frame.pack(fill="x", padx=16, pady=(0, 10))
+        self.playlist_toggle_btn.pack(fill="x", ipady=6)
 
-        btn_row = tk.Frame(local_frame, bg=BG)
-        btn_row.pack(fill="x", padx=10, pady=(10, 4))
+        self.playlist_body = tk.Frame(playlist_section, bg=BG)
+        self.playlist_body.pack(fill="both", expand=True)
 
-        self._make_button(btn_row, "Load Track", self.load_track).pack(side="left", padx=4)
-        self._make_button(btn_row, "Load Folder", self.load_folder).pack(side="left", padx=4)
-
-        btn_row2 = tk.Frame(local_frame, bg=BG)
-        btn_row2.pack(fill="x", padx=10, pady=(0, 10))
-
-        self._make_button(btn_row2, "⏮ Prev", self.prev_track).pack(side="left", padx=4)
-        self._make_button(btn_row2, "▶ Play", self.play_local).pack(side="left", padx=4)
-        self._make_button(btn_row2, "⏸ Pause", self.pause).pack(side="left", padx=4)
-        self._make_button(btn_row2, "⏵ Resume", self.resume).pack(side="left", padx=4)
-        self._make_button(btn_row2, "⏹ Stop", self.stop).pack(side="left", padx=4)
-        self._make_button(btn_row2, "⏭ Next", self.next_track).pack(side="left", padx=4)
-
-        # ---- Playlist ----
-        playlist_row = tk.Frame(local_frame, bg=BG)
-        playlist_row.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        scrollbar = tk.Scrollbar(playlist_row, orient="vertical")
+        scrollbar = tk.Scrollbar(self.playlist_body, orient="vertical")
         self.playlist_box = tk.Listbox(
-            playlist_row, height=6, bg=BTN_BG, fg=FG, relief="flat",
+            self.playlist_body, height=6, bg=BTN_BG, fg=FG, relief="flat",
             highlightthickness=0, bd=0, selectbackground=ACCENT,
             selectforeground=FG, activestyle="none",
             yscrollcommand=scrollbar.set,
         )
         scrollbar.config(command=self.playlist_box.yview)
-        self.playlist_box.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="left", fill="y")
+        self.playlist_box.pack(side="left", fill="both", expand=True, pady=(4, 0))
+        scrollbar.pack(side="left", fill="y", pady=(4, 0))
         self.playlist_box.bind("<Double-Button-1>", self._on_playlist_double_click)
 
         # ---- YouTube controls ----
         yt_frame = tk.LabelFrame(
-            self.root, text="YouTube / YouTube Music Streaming (ad-free, no download, playlists supported)",
+            self.full_view, text="YouTube / YouTube Music Streaming (ad-free, no download, playlists supported)",
             font=FONT_LABEL,
             bg=BG, fg=FG_MUTED, bd=1, labelanchor="nw",
         )
@@ -249,8 +254,19 @@ class AudioPlayerApp:
             ).pack(anchor="w")
             self.stream_btn.configure(state="disabled")
 
+        # ---- Playback controls (bottom) ----
+        controls_row = tk.Frame(self.full_view, bg=BG)
+        controls_row.pack(pady=(0, 8))
+
+        self._make_button(controls_row, "⏮ Prev", self.prev_track).pack(side="left", padx=4)
+        self._make_button(controls_row, "▶ Play", self.play_local).pack(side="left", padx=4)
+        self._make_button(controls_row, "⏸ Pause", self.pause).pack(side="left", padx=4)
+        self._make_button(controls_row, "⏵ Resume", self.resume).pack(side="left", padx=4)
+        self._make_button(controls_row, "⏹ Stop", self.stop).pack(side="left", padx=4)
+        self._make_button(controls_row, "⏭ Next", self.next_track).pack(side="left", padx=4)
+
         # ---- Volume ----
-        vol_frame = tk.Frame(self.root, bg=BG)
+        vol_frame = tk.Frame(self.full_view, bg=BG)
         vol_frame.pack(fill="x", padx=16, pady=(0, 14))
 
         tk.Label(vol_frame, text="🔊 Volume", font=FONT_LABEL, bg=BG, fg=FG_MUTED).pack(side="left")
@@ -263,12 +279,128 @@ class AudioPlayerApp:
         self.volume_scale.set(self.volume)
         self.volume_scale.pack(side="left", padx=8)
 
+        self._build_mini_view()
+
     def _make_button(self, parent, text, command):
         return tk.Button(
             parent, text=text, command=command, font=FONT_BTN,
             bg=BTN_BG, fg=FG, activebackground=BTN_ACTIVE, activeforeground=FG,
             relief="flat", bd=0, padx=10, pady=6, cursor="hand2",
         )
+
+    # ------------------------------------------------------------------
+    # Playlist collapse/expand
+    # ------------------------------------------------------------------
+    def _toggle_playlist(self):
+        self.playlist_visible = not self.playlist_visible
+        if self.playlist_visible:
+            self.playlist_body.pack(fill="both", expand=True)
+            self.playlist_toggle_btn.configure(text="▼ Playlist")
+        else:
+            self.playlist_body.pack_forget()
+            self.playlist_toggle_btn.configure(text="▶ Playlist")
+
+    # ------------------------------------------------------------------
+    # Mini player (compact, always-on-top, draggable floating window)
+    # ------------------------------------------------------------------
+    def _build_mini_view(self):
+        self.mini_view = tk.Frame(self.root, bg=BG_PANEL)
+
+        top_row = tk.Frame(self.mini_view, bg=BG_PANEL)
+        top_row.pack(fill="x", padx=8, pady=(6, 2))
+
+        self.mini_track_var = tk.StringVar(value="No track loaded")
+        song_label = tk.Label(
+            top_row, textvariable=self.mini_track_var, font=FONT_LABEL,
+            bg=BG_PANEL, fg=FG, anchor="w",
+        )
+        song_label.pack(side="left", fill="x", expand=True)
+
+        self._make_button(top_row, "✕", self.on_close).pack(side="right", padx=(2, 0))
+        self._make_button(top_row, "🗗", self._exit_mini_mode).pack(side="right")
+
+        # Dragging: click-and-drag anywhere on the top row moves the window.
+        for widget in (self.mini_view, top_row, song_label):
+            widget.bind("<ButtonPress-1>", self._start_drag)
+            widget.bind("<B1-Motion>", self._do_drag)
+
+        controls_row = tk.Frame(self.mini_view, bg=BG_PANEL)
+        controls_row.pack(pady=(0, 8))
+
+        self._make_button(controls_row, "⏮", self.prev_track).pack(side="left", padx=3)
+        self.mini_playpause_btn = self._make_button(controls_row, "▶", self._toggle_play_pause)
+        self.mini_playpause_btn.pack(side="left", padx=3)
+        self._make_button(controls_row, "⏭", self.next_track).pack(side="left", padx=3)
+
+    def _start_drag(self, event):
+        self._drag_offset = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+
+    def _do_drag(self, event):
+        x = event.x_root - self._drag_offset[0]
+        y = event.y_root - self._drag_offset[1]
+        self.root.geometry(f"+{x}+{y}")
+
+    def _toggle_mini_mode(self):
+        if self.mini_mode:
+            self._exit_mini_mode()
+        else:
+            self._enter_mini_mode()
+
+    def _enter_mini_mode(self):
+        if self.mini_mode:
+            return
+        self._full_geometry = self.root.geometry()
+        self.full_view.pack_forget()
+        self.mini_view.pack(fill="both", expand=True)
+
+        width, height = 260, 90
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x = screen_w - width - 20
+        y = screen_h - height - 60  # sit just above the taskbar
+        self.root.minsize(1, 1)  # full view's minsize would otherwise clamp us back up
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.resizable(False, False)
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.mini_mode = True
+
+    def _exit_mini_mode(self):
+        if not self.mini_mode:
+            return
+        self.mini_view.pack_forget()
+        self.root.overrideredirect(False)
+        self.root.attributes("-topmost", False)
+        self.root.resizable(True, True)
+        self.root.minsize(520, 560)
+        self.full_view.pack(fill="both", expand=True)
+        if self._full_geometry:
+            self.root.geometry(self._full_geometry)
+        self.mini_mode = False
+
+    def _current_track_label(self):
+        if self.active_engine == "local" and self.local_path:
+            return os.path.basename(self.local_path)
+        if self.active_engine == "youtube" and self.youtube_title:
+            return self.youtube_title
+        if self.local_path:
+            return os.path.basename(self.local_path)
+        return "No track loaded"
+
+    def _is_playing(self):
+        if self.active_engine == "local":
+            return not self.local_is_paused and pygame.mixer.music.get_busy()
+        if self.active_engine == "youtube" and self.vlc_player is not None:
+            return self.vlc_player.get_state() == vlc.State.Playing
+        return False
+
+    def _toggle_play_pause(self):
+        if self.active_engine == "local":
+            self.resume() if self.local_is_paused else self.pause()
+        elif self.active_engine == "youtube" and self.vlc_player is not None:
+            self.resume() if self.vlc_player.get_state() == vlc.State.Paused else self.pause()
+        elif self.local_path:
+            self.play_local()
 
     # ------------------------------------------------------------------
     # Status / error helpers
@@ -711,6 +843,9 @@ class AudioPlayerApp:
                     self.root.after(0, self.next_track)
                 else:
                     self._set_status("Finished")
+
+        self.mini_track_var.set(self._current_track_label())
+        self.mini_playpause_btn.configure(text="⏸" if self._is_playing() else "▶")
 
         self.root.after(250, self._poll_progress)
 
