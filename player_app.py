@@ -12,6 +12,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from urllib.parse import parse_qs, urlparse
 
 import pygame
 
@@ -52,10 +53,35 @@ FONT_STATUS = ("Segoe UI", 10)
 FONT_LABEL = ("Segoe UI", 9)
 FONT_BTN = ("Segoe UI", 10)
 
-YOUTUBE_URL_RE = re.compile(
-    r"^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)",
-    re.IGNORECASE,
-)
+def parse_youtube_url(url):
+    """Classify a URL as a YouTube / YouTube Music video or playlist link.
+
+    Returns a ("video" | "playlist" | None, list_id) tuple. A watch URL that
+    also carries a "list=" param (e.g. a video opened from within a playlist)
+    is treated as a single video, not the playlist, to avoid surprising the
+    user who just wanted that one track.
+    """
+    if not url:
+        return None, None
+    candidate = url if re.match(r"^https?://", url, re.IGNORECASE) else f"https://{url}"
+    parsed = urlparse(candidate)
+    host = parsed.netloc.lower()
+    if not (host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")):
+        return None, None
+
+    query = parse_qs(parsed.query)
+    list_id = query.get("list", [None])[0]
+    video_id = query.get("v", [None])[0]
+    path = parsed.path.rstrip("/")
+
+    if host == "youtu.be" and not video_id:
+        video_id = path.lstrip("/") or None
+
+    if list_id and (path.endswith("/playlist") or not video_id):
+        return "playlist", list_id
+    if video_id or path.startswith("/shorts/"):
+        return "video", None
+    return None, None
 
 
 def format_time(seconds):
@@ -153,7 +179,7 @@ class AudioPlayerApp:
 
         # ---- Local file controls ----
         local_frame = tk.LabelFrame(
-            self.root, text="Local Playback", font=FONT_LABEL,
+            self.root, text="Playback Queue", font=FONT_LABEL,
             bg=BG, fg=FG_MUTED, bd=1, labelanchor="nw",
         )
         local_frame.pack(fill="x", padx=16, pady=(0, 10))
@@ -192,7 +218,8 @@ class AudioPlayerApp:
 
         # ---- YouTube controls ----
         yt_frame = tk.LabelFrame(
-            self.root, text="YouTube Streaming (ad-free, no download)", font=FONT_LABEL,
+            self.root, text="YouTube / YouTube Music Streaming (ad-free, no download, playlists supported)",
+            font=FONT_LABEL,
             bg=BG, fg=FG_MUTED, bd=1, labelanchor="nw",
         )
         yt_frame.pack(fill="x", padx=16, pady=(0, 10))
@@ -269,7 +296,7 @@ class AudioPlayerApp:
             self._set_error("Selected file no longer exists.")
             return
 
-        self.playlist = [path]
+        self.playlist = [{"type": "local", "path": path}]
         self._refresh_playlist_listbox()
         self._load_local_path(path, index=0)
 
@@ -291,16 +318,26 @@ class AudioPlayerApp:
             self._set_error("No .mp3 or .wav files found in that folder.")
             return
 
-        self.playlist = [os.path.join(folder, name) for name in names]
+        self.playlist = [{"type": "local", "path": os.path.join(folder, name)} for name in names]
         self._refresh_playlist_listbox()
         self._clear_error()
         self._set_status(f"Loaded playlist: {len(self.playlist)} track(s) from {os.path.basename(folder)}")
-        self._load_local_path(self.playlist[0], index=0)
+        self._load_local_path(self.playlist[0]["path"], index=0)
 
     def _refresh_playlist_listbox(self):
         self.playlist_box.delete(0, "end")
-        for path in self.playlist:
-            self.playlist_box.insert("end", os.path.basename(path))
+        for item in self.playlist:
+            if item["type"] == "local":
+                label = os.path.basename(item["path"])
+            else:
+                label = f"▶ {item.get('title') or item['url']}"
+            self.playlist_box.insert("end", label)
+
+    def _highlight_playlist_index(self, index):
+        self.playlist_box.selection_clear(0, "end")
+        if 0 <= index < self.playlist_box.size():
+            self.playlist_box.selection_set(index)
+            self.playlist_box.see(index)
 
     def _on_playlist_double_click(self, _event):
         selection = self.playlist_box.curselection()
@@ -311,8 +348,14 @@ class AudioPlayerApp:
     def _play_index(self, index):
         if index < 0 or index >= len(self.playlist):
             return
-        self._load_local_path(self.playlist[index], index=index)
-        self.play_local()
+        item = self.playlist[index]
+        self.playlist_index = index
+        if item["type"] == "local":
+            self._load_local_path(item["path"], index=index)
+            self.play_local()
+        else:
+            self._highlight_playlist_index(index)
+            self._play_youtube_item(item)
 
     def next_track(self):
         if not self.playlist:
@@ -339,11 +382,7 @@ class AudioPlayerApp:
         self.duration_var.set(format_time(self.local_duration))
         self.elapsed_var.set("0:00")
         self.progress_scale.set(0)
-
-        self.playlist_box.selection_clear(0, "end")
-        if 0 <= index < self.playlist_box.size():
-            self.playlist_box.selection_set(index)
-            self.playlist_box.see(index)
+        self._highlight_playlist_index(index)
 
     def play_local(self):
         if not self.local_path:
@@ -424,20 +463,84 @@ class AudioPlayerApp:
 
         url = self.url_var.get().strip()
         if not url:
-            self._set_error("Enter a YouTube URL first.")
+            self._set_error("Enter a YouTube or YouTube Music URL first.")
             return
-        if not YOUTUBE_URL_RE.match(url):
-            self._set_error("That doesn't look like a valid YouTube URL.")
+        kind, _list_id = parse_youtube_url(url)
+        if kind is None:
+            self._set_error("That doesn't look like a valid YouTube/YouTube Music URL.")
             return
 
         self._clear_error()
-        self._set_status("Resolving stream…")
         self.stream_btn.configure(state="disabled")
 
-        thread = threading.Thread(target=self._extract_and_play, args=(url,), daemon=True)
+        if kind == "playlist":
+            self._set_status("Resolving playlist…")
+            thread = threading.Thread(target=self._extract_playlist_and_load, args=(url,), daemon=True)
+        else:
+            self._set_status("Resolving stream…")
+            thread = threading.Thread(target=self._extract_and_play, args=(url, False), daemon=True)
         thread.start()
 
-    def _extract_and_play(self, url):
+    def _play_youtube_item(self, item):
+        if not VLC_AVAILABLE:
+            self._set_error("VLC is not available; cannot stream YouTube audio.")
+            return
+        if not YTDLP_AVAILABLE:
+            self._set_error("yt-dlp is not installed; cannot stream YouTube audio.")
+            return
+
+        self._clear_error()
+        self._set_status(f"Resolving: {item.get('title') or item['url']}…")
+        thread = threading.Thread(target=self._extract_and_play, args=(item["url"], True), daemon=True)
+        thread.start()
+
+    def _extract_playlist_and_load(self, url):
+        ydl_opts = {
+            "extract_flat": "in_playlist",
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except yt_dlp.utils.DownloadError as exc:
+            self.root.after(0, self._on_youtube_error, f"Could not resolve playlist: {exc}")
+            return
+        except Exception as exc:
+            self.root.after(0, self._on_youtube_error, f"Unexpected error: {exc}")
+            return
+
+        items = []
+        for entry in info.get("entries") or []:
+            if not entry:
+                continue
+            video_id = entry.get("id")
+            if not video_id:
+                continue
+            items.append({
+                "type": "youtube",
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "title": entry.get("title") or video_id,
+            })
+
+        if not items:
+            self.root.after(0, self._on_youtube_error, "Playlist is empty or could not be read.")
+            return
+
+        playlist_title = info.get("title") or "YouTube playlist"
+        self.root.after(0, self._on_youtube_playlist_loaded, items, playlist_title)
+
+    def _on_youtube_playlist_loaded(self, items, playlist_title):
+        self.playlist = items
+        self.playlist_index = -1
+        self._refresh_playlist_listbox()
+        self._clear_error()
+        self._set_status(f"Loaded playlist: {len(items)} track(s) — {playlist_title}")
+        self.stream_btn.configure(state="normal")
+        self._play_index(0)
+
+    def _extract_and_play(self, url, is_playlist_item):
         ydl_opts = {
             "format": "bestaudio/best",
             "quiet": True,
@@ -464,9 +567,9 @@ class AudioPlayerApp:
             self.root.after(0, self._on_youtube_error, "No playable audio stream found for this video.")
             return
 
-        self.root.after(0, self._start_vlc_playback, stream_url, title)
+        self.root.after(0, self._start_vlc_playback, stream_url, title, url, is_playlist_item)
 
-    def _start_vlc_playback(self, stream_url, title):
+    def _start_vlc_playback(self, stream_url, title, original_url, is_playlist_item):
         pygame.mixer.music.stop()  # ensure local playback yields to streaming
 
         try:
@@ -491,6 +594,17 @@ class AudioPlayerApp:
         self.elapsed_var.set("0:00")
         self.duration_var.set("--:--")
         self.progress_scale.set(0)
+
+        if is_playlist_item:
+            if 0 <= self.playlist_index < len(self.playlist):
+                self.playlist[self.playlist_index]["title"] = title
+                self._refresh_playlist_listbox()
+                self._highlight_playlist_index(self.playlist_index)
+        else:
+            self.playlist = [{"type": "youtube", "url": original_url, "title": title}]
+            self.playlist_index = 0
+            self._refresh_playlist_listbox()
+            self._highlight_playlist_index(0)
 
     def _on_youtube_error(self, message):
         self._set_error(message)
@@ -571,16 +685,22 @@ class AudioPlayerApp:
                 if time_ms and time_ms >= 0:
                     self.elapsed_var.set(format_time(time_ms / 1000))
 
-            if (
+            finished_local = (
                 self.active_engine == "local"
                 and not self.local_is_paused
                 and not pygame.mixer.music.get_busy()
-            ):
-                # Track finished naturally.
+            )
+            finished_youtube = (
+                self.active_engine == "youtube"
+                and self.vlc_player is not None
+                and self.vlc_player.get_state() == vlc.State.Ended
+            )
+
+            if finished_local or finished_youtube:
                 self.active_engine = None
                 self.local_is_paused = False
                 self.local_offset = 0.0
-                self.elapsed_var.set(format_time(self.local_duration or 0))
+                self.youtube_title = None
                 self.progress_scale.set(1000)
 
                 has_next = (
