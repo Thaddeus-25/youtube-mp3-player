@@ -117,6 +117,7 @@ class AudioPlayerApp:
 
         self.volume = 70  # 0-100, shared across engines
         self.user_seeking = False
+        self._pending_skip = None  # after() id for a scheduled skip past a bad track
 
         # --- playlist state ---
         self.playlist = []          # list of file paths
@@ -259,9 +260,8 @@ class AudioPlayerApp:
         controls_row.pack(pady=(0, 8))
 
         self._make_button(controls_row, "⏮ Prev", self.prev_track).pack(side="left", padx=4)
-        self._make_button(controls_row, "▶ Play", self.play_local).pack(side="left", padx=4)
-        self._make_button(controls_row, "⏸ Pause", self.pause).pack(side="left", padx=4)
-        self._make_button(controls_row, "⏵ Resume", self.resume).pack(side="left", padx=4)
+        self.playpause_btn = self._make_button(controls_row, "▶ Play", self._toggle_play_pause)
+        self.playpause_btn.pack(side="left", padx=4)
         self._make_button(controls_row, "⏹ Stop", self.stop).pack(side="left", padx=4)
         self._make_button(controls_row, "⏭ Next", self.next_track).pack(side="left", padx=4)
 
@@ -280,6 +280,13 @@ class AudioPlayerApp:
         self.volume_scale.pack(side="left", padx=8)
 
         self._build_mini_view()
+        self.root.bind("<space>", self._on_space)
+
+    def _on_space(self, event):
+        if isinstance(event.widget, tk.Entry):
+            return  # let the URL box receive normal spaces
+        self._toggle_play_pause()
+        return "break"
 
     def _make_button(self, parent, text, command):
         return tk.Button(
@@ -399,8 +406,11 @@ class AudioPlayerApp:
             self.resume() if self.local_is_paused else self.pause()
         elif self.active_engine == "youtube" and self.vlc_player is not None:
             self.resume() if self.vlc_player.get_state() == vlc.State.Paused else self.pause()
-        elif self.local_path:
-            self.play_local()
+        elif self.playlist and 0 <= self.playlist_index < len(self.playlist):
+            # Nothing active (stopped or finished): restart the current entry.
+            self._play_index(self.playlist_index)
+        else:
+            self.play_local()  # surfaces the "no track loaded" hint
 
     # ------------------------------------------------------------------
     # Status / error helpers
@@ -480,14 +490,35 @@ class AudioPlayerApp:
     def _play_index(self, index):
         if index < 0 or index >= len(self.playlist):
             return
+        self._cancel_pending_skip()
         item = self.playlist[index]
         self.playlist_index = index
         if item["type"] == "local":
             self._load_local_path(item["path"], index=index)
-            self.play_local()
+            if not self.play_local():
+                self._schedule_skip()
         else:
             self._highlight_playlist_index(index)
             self._play_youtube_item(item)
+
+    def _schedule_skip(self):
+        """Auto-advance past an unavailable track. Never wraps around, so a
+        playlist where everything is broken stops at the end instead of
+        cycling forever."""
+        if not (self.playlist and 0 <= self.playlist_index < len(self.playlist) - 1):
+            return
+        self._set_status("Track unavailable — skipping to next…")
+        self._cancel_pending_skip()
+        self._pending_skip = self.root.after(700, self._do_skip)
+
+    def _do_skip(self):
+        self._pending_skip = None
+        self.next_track()
+
+    def _cancel_pending_skip(self):
+        if self._pending_skip is not None:
+            self.root.after_cancel(self._pending_skip)
+            self._pending_skip = None
 
     def next_track(self):
         if not self.playlist:
@@ -517,12 +548,13 @@ class AudioPlayerApp:
         self._highlight_playlist_index(index)
 
     def play_local(self):
+        """Start the loaded local track. Returns True on success."""
         if not self.local_path:
             self._set_error("No local track loaded. Click 'Load Track' first.")
-            return
+            return False
         if not os.path.isfile(self.local_path):
             self._set_error("The loaded file could not be found on disk.")
-            return
+            return False
 
         self._stop_youtube(silent=True)
 
@@ -532,7 +564,7 @@ class AudioPlayerApp:
             pygame.mixer.music.play(start=0.0)
         except Exception as exc:
             self._set_error(f"Could not play file: {exc}")
-            return
+            return False
 
         self.active_engine = "local"
         self.local_offset = 0.0
@@ -540,6 +572,7 @@ class AudioPlayerApp:
         self.local_is_paused = False
         self._clear_error()
         self._set_status(f"Playing: {os.path.basename(self.local_path)}")
+        return True
 
     def pause(self):
         if self.active_engine == "local":
@@ -564,6 +597,7 @@ class AudioPlayerApp:
             self._set_status(f"Playing: {self.youtube_title or 'YouTube stream'}")
 
     def stop(self):
+        self._cancel_pending_skip()
         if self.active_engine == "local":
             pygame.mixer.music.stop()
             self.active_engine = None
@@ -603,6 +637,7 @@ class AudioPlayerApp:
             return
 
         self._clear_error()
+        self._cancel_pending_skip()
         self.stream_btn.configure(state="disabled")
 
         if kind == "playlist":
@@ -684,10 +719,10 @@ class AudioPlayerApp:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
         except yt_dlp.utils.DownloadError as exc:
-            self.root.after(0, self._on_youtube_error, f"Could not resolve video: {exc}")
+            self.root.after(0, self._on_youtube_error, f"Could not resolve video: {exc}", is_playlist_item)
             return
         except Exception as exc:
-            self.root.after(0, self._on_youtube_error, f"Unexpected error: {exc}")
+            self.root.after(0, self._on_youtube_error, f"Unexpected error: {exc}", is_playlist_item)
             return
 
         stream_url = info.get("url")
@@ -696,7 +731,8 @@ class AudioPlayerApp:
         title = info.get("title", "YouTube stream")
 
         if not stream_url:
-            self.root.after(0, self._on_youtube_error, "No playable audio stream found for this video.")
+            self.root.after(0, self._on_youtube_error,
+                            "No playable audio stream found for this video.", is_playlist_item)
             return
 
         self.root.after(0, self._start_vlc_playback, stream_url, title, url, is_playlist_item)
@@ -715,7 +751,7 @@ class AudioPlayerApp:
             if result == -1:
                 raise RuntimeError("VLC failed to start playback")
         except Exception as exc:
-            self._on_youtube_error(f"Playback failed: {exc}")
+            self._on_youtube_error(f"Playback failed: {exc}", is_playlist_item)
             return
 
         self.active_engine = "youtube"
@@ -738,10 +774,12 @@ class AudioPlayerApp:
             self._refresh_playlist_listbox()
             self._highlight_playlist_index(0)
 
-    def _on_youtube_error(self, message):
+    def _on_youtube_error(self, message, skip=False):
         self._set_error(message)
         self._set_status("Idle")
         self.stream_btn.configure(state="normal")
+        if skip:
+            self._schedule_skip()
 
     def _stop_youtube(self, silent):
         if self.vlc_player is not None:
@@ -825,7 +863,7 @@ class AudioPlayerApp:
             finished_youtube = (
                 self.active_engine == "youtube"
                 and self.vlc_player is not None
-                and self.vlc_player.get_state() == vlc.State.Ended
+                and self.vlc_player.get_state() in (vlc.State.Ended, vlc.State.Error)
             )
 
             if finished_local or finished_youtube:
@@ -845,7 +883,9 @@ class AudioPlayerApp:
                     self._set_status("Finished")
 
         self.mini_track_var.set(self._current_track_label())
-        self.mini_playpause_btn.configure(text="⏸" if self._is_playing() else "▶")
+        is_playing = self._is_playing()
+        self.mini_playpause_btn.configure(text="⏸" if is_playing else "▶")
+        self.playpause_btn.configure(text="⏸ Pause" if is_playing else "▶ Play")
 
         self.root.after(250, self._poll_progress)
 
