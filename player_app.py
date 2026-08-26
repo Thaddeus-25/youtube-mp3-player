@@ -316,15 +316,18 @@ class AudioPlayerApp:
         top_row = tk.Frame(self.mini_view, bg=BG_PANEL)
         top_row.pack(fill="x", padx=8, pady=(6, 2))
 
+        # Buttons are packed before the label: with pack(), later widgets get
+        # squeezed out first when space runs short, so the label (not the
+        # buttons) must be the one that shrinks when the title is long.
+        self._make_button(top_row, "✕", self.on_close).pack(side="right", padx=(2, 0))
+        self._make_button(top_row, "🗗", self._exit_mini_mode).pack(side="right")
+
         self.mini_track_var = tk.StringVar(value="No track loaded")
         song_label = tk.Label(
             top_row, textvariable=self.mini_track_var, font=FONT_LABEL,
             bg=BG_PANEL, fg=FG, anchor="w",
         )
         song_label.pack(side="left", fill="x", expand=True)
-
-        self._make_button(top_row, "✕", self.on_close).pack(side="right", padx=(2, 0))
-        self._make_button(top_row, "🗗", self._exit_mini_mode).pack(side="right")
 
         # Dragging: click-and-drag anywhere on the top row moves the window.
         for widget in (self.mini_view, top_row, song_label):
@@ -882,7 +885,10 @@ class AudioPlayerApp:
                 else:
                     self._set_status("Finished")
 
-        self.mini_track_var.set(self._current_track_label())
+        label = self._current_track_label()
+        if len(label) > 30:  # keep the mini player's 🗗/✕ buttons visible
+            label = label[:29] + "…"
+        self.mini_track_var.set(label)
         is_playing = self._is_playing()
         self.mini_playpause_btn.configure(text="⏸" if is_playing else "▶")
         self.playpause_btn.configure(text="⏸ Pause" if is_playing else "▶ Play")
