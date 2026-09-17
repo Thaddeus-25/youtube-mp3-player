@@ -40,8 +40,8 @@ BG = "#1a1a24"
 BG_PANEL = "#22222e"
 FG = "#e6e6ef"
 FG_MUTED = "#9a9aab"
-ACCENT = "#7c5cff"
-ACCENT_DARK = "#5c3fd6"
+ACCENT = "#3ddc84"
+ACCENT_DARK = "#2aa862"
 BTN_BG = "#2c2c3c"
 BTN_ACTIVE = "#3a3a4d"
 TROUGH = "#33333f"
@@ -214,7 +214,7 @@ class AudioPlayerApp:
         self.playlist_box = tk.Listbox(
             self.playlist_body, height=6, bg=BTN_BG, fg=FG, relief="flat",
             highlightthickness=0, bd=0, selectbackground=ACCENT,
-            selectforeground=FG, activestyle="none",
+            selectforeground=BG, activestyle="none",
             yscrollcommand=scrollbar.set,
         )
         scrollbar.config(command=self.playlist_box.yview)
